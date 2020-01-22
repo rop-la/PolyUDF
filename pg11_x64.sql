@@ -1,6 +1,6 @@
 CREATE OR REPLACE FUNCTION fibbonachi(int)
   RETURNS int AS
-E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'fibbonachi'
+E'C:\\Program Files\\PostgreSQL\\11\\bin\\PolyUDF.dll', 'fibbonachi'
   LANGUAGE c VOLATILE STRICT
   COST 1;
 ALTER FUNCTION fibbonachi(int)
@@ -8,7 +8,7 @@ ALTER FUNCTION fibbonachi(int)
   
 CREATE OR REPLACE FUNCTION sys_cleanup(text)
   RETURNS text AS
-E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'sys_cleanup'
+E'C:\\Program Files\\PostgreSQL\\11\\bin\\PolyUDF.dll', 'sys_cleanup'
   LANGUAGE c VOLATILE STRICT
   COST 1;
 ALTER FUNCTION sys_cleanup(text)
@@ -16,7 +16,7 @@ ALTER FUNCTION sys_cleanup(text)
 
 CREATE OR REPLACE FUNCTION sys_eval(text)
   RETURNS text AS
-E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'sys_eval'
+E'C:\\Program Files\\PostgreSQL\\11\\bin\\PolyUDF.dll', 'sys_eval'
   LANGUAGE c VOLATILE STRICT
   COST 1;
 ALTER FUNCTION sys_eval(text)

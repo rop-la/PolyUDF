@@ -1,17 +1,9 @@
-CREATE OR REPLACE FUNCTION fibbonachi(int)
-  RETURNS int AS
-E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'fibbonachi'
-  LANGUAGE c VOLATILE STRICT
-  COST 1;
-ALTER FUNCTION fibbonachi(int)
-  OWNER TO postgres;
-  
-CREATE OR REPLACE FUNCTION sys_cleanup(text)
-  RETURNS text AS
+CREATE OR REPLACE FUNCTION sys_cleanup()
+  RETURNS int4 AS
 E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'sys_cleanup'
   LANGUAGE c VOLATILE STRICT
   COST 1;
-ALTER FUNCTION sys_cleanup(text)
+ALTER FUNCTION sys_cleanup()
   OWNER TO postgres;
 
 CREATE OR REPLACE FUNCTION sys_eval(text)
@@ -22,13 +14,18 @@ E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'sys_eval'
 ALTER FUNCTION sys_eval(text)
   OWNER TO postgres;
 
+CREATE OR REPLACE FUNCTION sys_exec(text)
+  RETURNS int4 AS
+E'C:\\Program Files (x86)\\PostgreSQL\\10\\bin\\PolyUDF.dll', 'sys_exec'
+  LANGUAGE c VOLATILE STRICT
+  COST 1;
+ALTER FUNCTION sys_exec(text)
+  OWNER TO postgres;
 
-
-select fibbonachi(10);
+select sys_exec('whoami');
 select sys_eval('whoami');
-select sys_cleanup('foobar');
+select sys_cleanup();
 
-
-drop function fibbonachi(int);
 drop function sys_eval(text);
-drop function sys_cleanup(text);
+drop function sys_exec(text);
+drop function sys_cleanup();

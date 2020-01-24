@@ -8,7 +8,7 @@ We use some Windows specific tricks for supporting multiple versions of PostgreS
 The main features of PolyUDF are:
 * Multiversion (9.4+ - version 1 calling convention) and architecture (x86/x64) support (Pretty obvious)
 * Clean DLL and functions loading and registering (Register one function that register all!)
-* Clean DLL and functions unloading and unregistering (Register one function that register all and unloads DLL, no more service restart to leave no trace)
+* Clean DLL and functions unloading and unregistering (Register one function that unregister all functions and unloads the DLL. No more service restart to delete DLL from disk and leave no trace.)
 
 The current TODO List:
 - [ ] Support for Linux

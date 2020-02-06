@@ -22,4 +22,5 @@ PolyUDF was build using the following software environment:
 * Visual Studio 2015 Update 3
 * PostgreSQL 10 (32/64 bits)
 * Windows SDK v7.1A and 10
+
 It will work with other configurations but we have not tested it yet.

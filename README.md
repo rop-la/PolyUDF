@@ -15,3 +15,11 @@ The current TODO List:
 - [ ] Implement all functions required by SQLMap
 - [ ] Integrate into SQLMap
 - [ ] Validate and add support to 8.x - 9.3 versions (Version 0 calling convention)
+
+# Build environment
+PolyUDF was build using the following software environment:
+* Windows 7 Professional (64 bits)
+* Visual Studio 2015 Update 3
+* PostgreSQL 10 (32/64 bits)
+* Windows SDK v7.1A and 10
+It will work with other configurations but we have not tested it yet.
